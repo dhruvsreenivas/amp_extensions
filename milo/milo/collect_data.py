@@ -137,7 +137,7 @@ def get_args():
     parser.add_argument('--dataset_name', type=str, default='offline.pt')
     parser.add_argument('--stat_path', type=str,
                         help='path to stats that we will use to decide how many trajectories to sample from each model when creating dataset',
-                        default='../../datasets/stats/stats.pt')
+                        default='../../data/stats/stats.pt')
 
     ######Stat collection parameters######
     parser.add_argument('--record_stats',
