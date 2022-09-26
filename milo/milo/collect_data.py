@@ -236,7 +236,7 @@ def main():
                  range(lower_checkpoint, upper_checkpoint + 1, 200)]
     else:
         stats = torch.load(args.stat_path)
-        if args.use_length_boundaires:
+        if args.use_length_boundaries:
             paths = [(prefix + f"{i:05}.ckpt",
                       args.repetitions[bisect.bisect_left(args.lower_limits, stats[i]['average_len']) - 1]) for i in
                      range(lower_checkpoint, upper_checkpoint + 1, 200)]
