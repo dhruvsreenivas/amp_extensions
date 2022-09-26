@@ -1,0 +1,155 @@
+import deepmimic.learning.agent_builder as AgentBuilder
+import deepmimic.learning.tf_util as TFUtil
+from deepmimic.learning.rl_agent import RLAgent
+from deepmimic.util.logger import Logger
+
+class RLWorld(object):
+    def __init__(self, env, arg_parser):
+        TFUtil.disable_gpu()
+
+        self.env = env
+        self.arg_parser = arg_parser
+        self._enable_training = True
+        self.train_agents = []
+        self.parse_args(arg_parser)
+
+        self.build_agents()
+
+        return
+
+    def get_enable_training(self):
+        return self._enable_training
+    
+    def set_enable_training(self, enable):
+        self._enable_training = enable
+        is_train_mode = self._enable_training
+
+        for i in range(len(self.agents)):
+            curr_agent = self.agents[i]
+            if curr_agent is not None:
+                enable_curr_train = self.train_agents[i] if (len(self.train_agents) > 0) else True
+                curr_agent.enable_training = self.enable_training and enable_curr_train
+
+                if (i == 0):
+                    is_train_mode = curr_agent.enable_training
+
+        if (is_train_mode):
+            self.env.set_mode(RLAgent.Mode.TRAIN)
+        else:
+            #Setting agent to Test Mode and Resetting
+            self.env.set_mode(RLAgent.Mode.TEST)
+            #Need to reset env after setting test mode. All setting test mode does is set test flag but doesn't change timer in deepmimiccore so
+            #first episode will be 0.5s instead of max horizon.
+            self.env.reset()
+        return
+
+    enable_training = property(get_enable_training, set_enable_training)
+    
+    def parse_args(self, arg_parser):
+        self.train_agents = self.arg_parser.parse_bools('train_agents')
+        num_agents = self.env.get_num_agents()
+        assert(len(self.train_agents) == num_agents or len(self.train_agents) == 0)
+
+        return
+
+    def shutdown(self):
+        self.env.shutdown()
+        return
+
+    def build_agents(self):
+        num_agents = self.env.get_num_agents()
+        self.agents = []
+
+        Logger.print('')
+        Logger.print('Num Agents: {:d}'.format(num_agents))
+
+        agent_files = self.arg_parser.parse_strings('agent_files')
+        assert(len(agent_files) == num_agents or len(agent_files) == 0)
+
+        model_files = self.arg_parser.parse_strings('model_files')
+        assert(len(model_files) == num_agents or len(model_files) == 0)
+
+        output_path = self.arg_parser.parse_string('output_path')
+        int_output_path = self.arg_parser.parse_string('int_output_path')
+
+        for i in range(num_agents):
+            curr_file = agent_files[i]
+            curr_agent = self._build_agent(i, curr_file)
+
+            if curr_agent is not None:
+                curr_agent.output_dir = output_path
+                curr_agent.int_output_dir = int_output_path
+                Logger.print(str(curr_agent))
+
+                if (len(model_files) > 0):
+                    curr_model_file = model_files[i]
+                    if curr_model_file != 'none':
+                        curr_agent.load_model(curr_model_file)
+
+            self.agents.append(curr_agent)
+            Logger.print('')
+
+        self.set_enable_training(self.enable_training)
+
+        return
+
+    def update(self, timestep):
+        self._update_agents(timestep)
+        self._update_env(timestep)
+        return
+
+    def reset(self):
+        self._reset_agents()
+        self._reset_env()
+        return
+
+    def reset_index(self, index, resolve = True, noise_bef_rot = False, low = 0, high = 0, radian = 0,
+		    rot_vel_w_pose = False, vel_noise = False, interp = 1, knee_rot = False):
+        self._reset_agents()
+        self.env.reset_index(index, resolve, noise_bef_rot, low, high, radian, 
+                              rot_vel_w_pose, vel_noise, interp, knee_rot)
+        
+    def reset_time(self, time, resolve = True, noise_bef_rot = False, low = 0, high = 0, radian = 0,
+		    rot_vel_w_pose = False, vel_noise = False, interp = 1, knee_rot = False):
+        self._reset_agents()
+        self.env.reset_time(time, resolve, noise_bef_rot, low, high, radian, rot_vel_w_pose, vel_noise, interp, knee_rot)
+
+    def end_episode(self):
+        self._end_episode_agents();
+        return
+
+    def _update_env(self, timestep):
+        self.env.update(timestep)
+        return
+
+    def _update_agents(self, timestep):
+        for agent in self.agents:
+            if (agent is not None):
+                agent.update(timestep)
+        return
+
+    def _reset_env(self):
+        self.env.reset()
+        return
+
+    def _reset_agents(self):
+        for agent in self.agents:
+            if (agent != None):
+                agent.reset()
+        return
+
+    def _end_episode_agents(self):
+        for agent in self.agents:
+            if (agent != None):
+                agent.end_episode()
+        return
+
+    def _build_agent(self, id, agent_file):
+        Logger.print('Agent {:d}: {}'.format(id, agent_file))
+        if (agent_file == 'none'):
+            agent = None
+        else:
+            agent = AgentBuilder.build_agent(self, id, agent_file)
+            assert (agent != None), 'Failed to build agent {:d} from: {}'.format(id, agent_file)
+        
+        return agent

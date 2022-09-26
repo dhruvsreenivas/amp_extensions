@@ -1,0 +1,1 @@
+from gym_deepmimic.envs.gym_deepmimic import DeepMimicGymEnv
