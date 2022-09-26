@@ -28,7 +28,9 @@ conda install -c conda-forge bullet=2.88 eigen=3.3.7 freeglut=3.0.0 glew=2.1.0 g
 conda install -c pytorch pytorch
 pip install mpi4py PyOpenGL PyOpenGL_accelerate tensorboard==2.10.0
 ```
-If conda get stucks at solving environment or times out, try installing the packages from the ```conda-forge``` channel one at a time. 
+If conda get stucks at solving environment or times out, try installing the packages from the ```conda-forge``` channel one at a time.
+
+`Tensorboard v2.10.0` is technically not compatible with `Tensorflow v1.13.1`. The only reason it is installed is the MILO code uses `Tensorboard` and `PyTorch` needs a newer version than the `Tensorboard` installed with `Tensorflow v1.13.1`. If you want to use `Tensorboard` with `Tensorflow`, you may have to downgrade. Additionally, having `Tensorboard v2.10.0` may cause conflicts in the environment so only use it when necessary. 
 #### Building DeepMimicCore 
 DeepMimicCore will be built using ```clang```
 1. Modify the `Makefile` in `DeepMimicCore/` by specifying the following,
@@ -72,6 +74,8 @@ pip install mpi4py PyOpenGL_accelerate tensorboard==2.10.0
 Do not install PyOpenGL directly from pip as the version downloaded (for python 3.7) is missing the freeglut DLL. Instead, download the pacakge wheel `PyOpenGL-3.1.6-cp37-cp37m-win_amd64.whl` from the [Unofficial Windows Binaries for Python Extension Packages](https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyopengl). Once this is downloaded, install the wheel:
 
 `pip install <path to PyOpenGL binary here>`
+
+`Tensorboard v2.10.0` is technically not compatible with `Tensorflow v1.13.1`. The only reason it is installed is the MILO code uses `Tensorboard` and `PyTorch` needs a newer version than the `Tensorboard` installed with `Tensorflow v1.13.1`. If you want to use `Tensorboard` with `Tensorflow`, you may have to downgrade. Additionally, having `Tensorboard v2.10.0` may cause conflicts in the environment so only use it when necessary. 
 ### Building Bullet
 Bullet can be built in ```Release``` or ```Debug``` mode. The ```Debug``` version allows us to use the debugger for ```DeepMimicCore```. The method for buildling both are similar. 
 #### Using premake
