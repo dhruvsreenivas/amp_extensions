@@ -11,6 +11,7 @@ import warnings
 import matplotlib.pyplot as plt
 #from milo.sampler import sample_points
 from .sampler import sample_points
+from .linear_cost import RBFLinearCost, MLPCost
 
 # ========================
 # === Evaluation Utils ===
@@ -18,12 +19,20 @@ from .sampler import sample_points
 
 def save_checkpoint(dirs, agent, cost_function, tag, agent_type='trpo'):
     save_dir = dirs['models_dir']
-    checkpoint = {'policy_params': agent.policy.get_param_values(),
-                  'old_policy_params': agent.policy.old_params,
-                  'baseline_params': agent.baseline.model.state_dict(),
-                  'baseline_optim': agent.baseline.optimizer.state_dict(),
-                  'w': cost_function.w,
-                  'rff': cost_function.rff.state_dict()}
+    if isinstance(cost_function, RBFLinearCost):
+        checkpoint = {'policy_params': agent.policy.get_param_values(),
+                    'old_policy_params': agent.policy.old_params,
+                    'baseline_params': agent.baseline.model.state_dict(),
+                    'baseline_optim': agent.baseline.optimizer.state_dict(),
+                    'w': cost_function.w,
+                    'rff': cost_function.rff.state_dict()}
+    elif isinstance(cost_function, MLPCost):
+        checkpoint = {'policy_params': agent.policy.get_param_values(),
+                    'old_policy_params': agent.policy.old_params,
+                    'baseline_params': agent.baseline.model.state_dict(),
+                    'baseline_optim': agent.baseline.optimizer.state_dict(),
+                    'w': cost_function.w,
+                    'net': cost_function.net.state_dict()}
     if agent_type == 'ppo':
         checkpoint['policy_optim'] = agent.optimizer.state_dict()
     torch.save(checkpoint, osp.join(save_dir, f'checkpoint_{tag}.pt'))
@@ -135,11 +144,16 @@ def evaluate(n_iter, logger, writer, args, env, policy, reward_func, num_traj=10
     greedy_x = torch.from_numpy(greedy_x).float()
     sample_x = torch.from_numpy(sample_x).float()
 
-    greedy_diff = reward_func.get_rep(greedy_x).mean(0) - reward_func.phi_e
-    sample_diff = reward_func.get_rep(sample_x).mean(0) - reward_func.phi_e
+    if reward_func is not None:
+        greedy_diff = reward_func.get_rep(greedy_x).mean(0) - reward_func.phi_e
+        sample_diff = reward_func.get_rep(sample_x).mean(0) - reward_func.phi_e
 
-    greedy_mmd = torch.dot(greedy_diff, greedy_diff)
-    sample_mmd = torch.dot(sample_diff, sample_diff)
+        greedy_mmd = torch.dot(greedy_diff, greedy_diff)
+        sample_mmd = torch.dot(sample_diff, sample_diff)
+    else:
+        print('Not caring about MMD here -- doing model-based RL')
+        greedy_mmd = 0.0
+        sample_mmd = 0.0
 
     # Log
     logger_score_name = 'DTW Cost' if imitate_amp else 'Reward'
@@ -187,7 +201,7 @@ def convert_to_veltopos(path, deepmimic, is_db_mjrl, is_expert):
         for i in x:
             # Trajs have the form {'episode':(all_state, action, reward), 'score':score} while expert have form {'episode'all_states}
             if is_expert:
-                i['episode'][:, vel_ffset:] *= dt
+                i['episode'][:, vel_offset:] *= dt
             else:
                 i['episode'][0][:, vel_offset:] *= dt  # state
 
@@ -344,16 +358,16 @@ def setup(args, ask_prompt=True):
     overwrite_log = False
     if osp.isdir(dynamic_experiment_dir):
 
-        delete = True
+        delete = False
 
-        if ask_prompt:
-            while True:
-                reply = input("Dynamic Experiment already exists, delete existing directory? (y/n) ").strip().lower()
-                if reply not in ['y', 'n', 'yes', 'no']:
-                    print('Please reply with y, n, yes, or no')
-                else:
-                    delete = False if reply in ['n', 'no'] else True
-                    break
+        # if ask_prompt:
+        #     while True:
+        #         reply = input("Dynamic Experiment already exists, delete existing directory? (y/n) ").strip().lower()
+        #         if reply not in ['y', 'n', 'yes', 'no']:
+        #             print('Please reply with y, n, yes, or no')
+        #         else:
+        #             delete = False if reply in ['n', 'no'] else True
+        #             break
 
         if delete:
             print('Deleting existing, duplicate dynamic experiment')

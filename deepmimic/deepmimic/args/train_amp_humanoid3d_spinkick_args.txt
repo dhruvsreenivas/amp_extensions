@@ -26,7 +26,8 @@
 --sync_char_root_pos true
 --sync_char_root_rot false
 
---agent_files data/agents/ct_agent_humanoid_amp.txt
+# --agent_files data/agents/ct_agent_humanoid_amp.txt
+--agent_files data/agents/ct_agent_humanoid_amp_noext.txt
 
 --output_path output
-#--int_output_path output/intermediate
+# --int_output_path output/intermediate

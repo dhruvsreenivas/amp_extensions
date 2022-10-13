@@ -2,14 +2,14 @@ BIN=Main
 OBJ_DIR = objs
 MKDIR = mkdir -p
 
-EIGEN_DIR =  <path to conda env>/include/eigen3
-BULLET_INC_DIR = <path to conda env>/include/bullet
+EIGEN_DIR =  /home/ds844/.conda/envs/amp/include/eigen3
+BULLET_INC_DIR = /home/ds844/.conda/envs/amp/include/bullet
 
-PYTHON_INC = <path to conda env>/include/python3.7m
-PYTHON_LIB = <path to conda env>/lib/python3.7
+PYTHON_INC = /home/ds844/.conda/envs/amp/include/python3.7m
+PYTHON_LIB = /home/ds844/.conda/envs/amp/lib/python3.7
 
-GL_INC = <path to conda env>/include
-GL_LIB = <path to conda env>/lib
+GL_INC = /home/ds844/.conda/envs/amp/include
+GL_LIB = /home/ds844/.conda/envs/amp/lib
 
 INC = -I./ \
 	-I$(EIGEN_DIR) \

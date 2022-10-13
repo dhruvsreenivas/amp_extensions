@@ -1,0 +1,17 @@
+name: transfer
+channels:
+  - defaults
+dependencies:
+  - python=3.7
+  - bullet=2.88
+  - eigen=3.3.7
+  - freeglut=3.0.0
+  - glew=2.1.0
+  - tqdm
+  - gdown
+  - tabulate
+  - swig
+  - tensorflow=1.13.1
+  - pytorch
+  - matplotlib
+prefix: /home/awt46/.conda/envs/transfer

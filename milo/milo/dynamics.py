@@ -21,6 +21,7 @@ class DynamicsEnsemble():
                  num_models=4,
                  batch_size=256,
                  hidden_sizes=[512,512],
+                 use_resnet=False,
                  dense_connect=True,
                  activation='relu',
                  transform=True,
@@ -65,6 +66,7 @@ class DynamicsEnsemble():
         self.models = [DynamicsModel(state_dim,
                                      action_dim,
                                      hidden_sizes=hidden_sizes,
+                                     use_resnet=use_resnet,
                                      dense_connect=dense_connect,
                                      activation=activation,
                                      transform=transform,
@@ -163,6 +165,7 @@ class DynamicsModel():
                  state_dim,
                  action_dim,
                  hidden_sizes=[512,512],
+                 use_resnet=False,
                  dense_connect=True,
                  activation='relu',
                  transform=True,
@@ -180,10 +183,13 @@ class DynamicsModel():
 
         self.state_dim = state_dim
         self.action_dim = action_dim
-        self.transform=transform
+        self.transform = transform
 
         self.device = device
-        self.model = BasicMLP(state_dim+action_dim, state_dim, hidden_sizes, dense_connect, activation).to(self.device)
+        if use_resnet:
+            self.model = ResidualMLP(state_dim + action_dim, state_dim, hidden_sizes, activation).to(self.device)
+        else:
+            self.model = BasicMLP(state_dim+action_dim, state_dim, hidden_sizes, dense_connect, activation).to(self.device)
 
         self.loss_fn = nn.MSELoss().to(self.device)
         if optim_args['optim'] == 'sgd':
@@ -399,10 +405,10 @@ class BasicMLP(nn.Module):
         self.dense_connect = dense_connect
         self.nonlinearity = torch.relu if activation == 'relu' else torch.tanh
 
-        self.layer_sizes = [input_dim, ]+hidden_sizes + [output_dim,]
+        self.layer_sizes = [input_dim,] + hidden_sizes + [output_dim,]
         layers = []
         for i in range(len(self.layer_sizes)-1):
-            layer_input_size =self.layer_sizes[i]
+            layer_input_size = self.layer_sizes[i]
             if self.dense_connect:
                 for j in range(0, i):
                     layer_input_size += self.layer_sizes[j]
@@ -421,3 +427,52 @@ class BasicMLP(nn.Module):
 
         out = self.fc_layers[-1](input)
         return out
+
+class ResidualMLP(nn.Module):
+    """
+    MLP Dynamics model implementation for Amp specifically. Applying residual connections (addition)
+    as opposed to dense connections (concatenation) to the dynamics model.
+    """
+    def __init__(self,
+                 input_dim,
+                 output_dim,
+                 hidden_sizes=[128, 128],
+                 activation='relu'):
+            
+        super().__init__()
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.activation = nn.ReLU() if activation == 'relu' else nn.Tanh()
+
+        layers = []
+        dim = hidden_sizes[0] if hidden_sizes else self.output_dim
+        layers.append(nn.Linear(self.input_dim, dim))
+        if hidden_sizes:
+            for size in hidden_sizes[1:]:
+                assert dim == size, "not residual"
+                layers.append(self.activation)
+                layers.append(nn.Linear(dim, size))
+                dim = size
+            layers.append(self.activation)
+        
+        layers.append(nn.Linear(dim, self.output_dim))
+        self.layers = nn.ModuleList(layers)
+        
+    def forward(self, x):
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x).float() # TODO add device handling, seems to only be for CPU
+
+        # initial preprocessing
+        x = self.layers[0](x)
+        x = self.activation(x)
+
+        # processing through residual layers
+        for layer in self.layers[1:-1]:
+            y = layer(x)
+            y = self.activation(y)
+            x = x + y
+        
+        out = self.layers[-1](x)
+        return out
+    
+            

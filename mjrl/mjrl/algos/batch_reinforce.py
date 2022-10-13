@@ -64,7 +64,7 @@ class BatchREINFORCE:
     # ----------------------------------------------------------
     def train_step(self, N,
                    env=None,
-                    sample_mode='model_based',
+                   sample_mode='model_based',
                    cost_input_type='ss',
                    gamma=0.995,
                    gae_lambda=0.97,
@@ -86,7 +86,7 @@ class BatchREINFORCE:
 
             paths = sample_points(env=env, policy=self.policy, num_to_collect=num_samples,
                                   base_seed=self.seed, num_workers=num_cpu, mode='samples',
-                                  eval_mode=eval_mode, verbose=verbose, deepmimic=False) #TODO CHANGE
+                                  eval_mode=eval_mode, verbose=verbose, deepmimic=False) # TODO CHANGE
 
 
         infos = {'int': [], 'ext': [], 'reward': [], 'ep_len': [], \

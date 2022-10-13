@@ -29,15 +29,19 @@ if __name__ == '__main__':
     print(f'Batch size: {args.batch_size}')
     print(f'Data path: {args.data_path}')
     print(f'lr: {args.lr}')
+    
     env = DeepMimicEnv(['--arg_file', args.env_args], False)
     print('CREATED ENV...CREATING POLICY')
+    
     policy = MLP(env.get_state_size(0), env.get_action_size(0), hidden_sizes=(args.hidden_size, args.hidden_size), seed=args.seed)
     print("CREATED POLICY...LOADING DATA")
+    
     offline_paths = get_paths_mjrl(args.data_path,'all')
-
     print('LOADED DATA...CREATING BC AGENT')
+    
     bc_agent = BC(offline_paths, policy=policy, epochs=args.epochs, batch_size=args.batch_size, lr=args.lr)
     print('CREATED BC AGENT...TRAINING')
+    
     #sys.exit(0)
     logs =bc_agent.train()
     print("TRAINED...SAVING")

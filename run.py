@@ -3,7 +3,7 @@ from milo.utils import *
 from milo.arguments import get_args
 from milo.dynamics import DynamicsEnsemble
 from milo.datasets import AmpDataset
-from milo.linear_cost import RBFLinearCost
+from milo.linear_cost import MLPCost, RBFLinearCost
 
 import numpy as np
 import torch
@@ -12,16 +12,18 @@ import gym
 import gym_simenv
 import gym_deepmimic
 import json
+
 from deepmimic.util.arg_parser import ArgParser
 from mjrl.policies.gaussian_mlp import MLP
 from mjrl.baselines.mlp_baseline import MLPBaseline
 from mjrl.algos.behavior_cloning import BC
 from mjrl.algos.npg_cg import NPG
 import time
+
 def main():
     all_start = time.time()
     args = get_args()
-    milo_directories, dynamic_directories, load_dynamics, loggers, writers, device = setup(args, ask_prompt=True)
+    milo_directories, dynamic_directories, load_dynamics, loggers, writers, device = setup(args, ask_prompt=False)
     # = torch.device('cpu')  # https://pytorch.org/docs/stable/notes/windows.html#cuda-ipc-operations currently need to force cpu on windows.
     # Create deepmimic core env
 
@@ -33,7 +35,7 @@ def main():
     state_size = env.get_state_size(0)
     action_size = env.get_action_size(0)
 
-    #Load Datasets
+    # Load Datasets
     offline_state, offline_action, offline_next_state = get_db_mjrl(args.offline_data, imitate_amp=imitate_amp)
     offline_dataset = AmpDataset(offline_state, offline_action, offline_next_state, device)
 
@@ -45,7 +47,7 @@ def main():
         validate_dataset = None
 
 
-    # ==========Create Dynamic Model===========#
+    # ==========Create Dynamic Model=========== #
     if args.dynamic_optim == 'sgd':
         optim_args = {'optim': 'sgd', 'lr': args.dynamic_lr, 'momentum': args.dynamic_momentum}
     elif args.dynamic_optim == 'adam':
@@ -54,7 +56,7 @@ def main():
         assert False, "Choose a valid optimizer"
 
 
-    # ==============Train dynamic model==============#
+    # ==============Train dynamic model============== #
     if load_dynamics:
         loggers['dynamic'].info(f'>>>>Loading Dynamics model')
         ensemble_path = args.dynamic_checkpoint if args.dynamic_checkpoint else os.path.join(
@@ -85,7 +87,7 @@ def main():
                                writer=writers['dynamic'])
         dynamic_ensemble.save_ensemble(os.path.join(dynamic_directories['models_dir'], 'ensemble.pt'))
 
-        #Reload dynamics model if model was trained on gpu. Force device to be cpu since milo IL will be on cpu.
+        # Reload dynamics model if model was trained on gpu. Force device to be cpu since milo IL will be on cpu.
         if device != torch.device('cpu'):
             device = torch.device('cpu')
             loggers['dynamic'].info(f">>>>Device moved to {device}")
@@ -109,9 +111,8 @@ def main():
                       radian=args.radian, rot_vel_w_pose=args.rot_vel_w_pose, vel_noise=args.vel_noise,
                       interp=args.interp, knee_rot=args.knee_rot)
 
-    mb_env = gym.make('simenv-v0', deepmimic_args=args.deepmimic, dynamic_ensemble=dynamic_ensemble,reset_args=reset_args)
+    mb_env = gym.make('simenv-v0', deepmimic_args=args.deepmimic, dynamic_ensemble=dynamic_ensemble, reset_args=reset_args)
     inf_env = gym.make('deepmimic-v0', deepmimic_args=args.deepmimic, reset_args=reset_args)
-
 
     # ==============Create Costs==============#
     if args.cost_input_type == 'ss':
@@ -119,17 +120,34 @@ def main():
         expert_state, expert_next_state = get_db_mjrl(args.expert_data, expert=True, imitate_amp=imitate_amp)
     else:
         expert_state, expert_action, expert_next_state = get_db_mjrl(args.expert_data, imitate_amp=imitate_amp)
-
-    if args.cost_input_type == 'ss':
-        cost_function = RBFLinearCost(torch.cat([expert_state, expert_next_state], dim=1),
-                                      feature_dim=args.cost_feature_dim, \
-                                      input_type=args.cost_input_type, bw_quantile=args.bw_quantile,
-                                      lambda_b=args.lambda_b, seed=args.seed)
-    elif args.cost_input_type == 'sa':
-        cost_function = RBFLinearCost(torch.cat([expert_state, expert_action], dim=1),
-                                      feature_dim=args.cost_feature_dim, \
-                                      input_type=args.cost_input_type, bw_quantile=args.bw_quantile,
-                                      lambda_b=args.lambda_b, seed=args.seed)
+        
+    if not args.mlp_cost:
+        if args.cost_input_type == 'ss':
+            cost_function = RBFLinearCost(torch.cat([expert_state, expert_next_state], dim=1),
+                                        feature_dim=args.cost_feature_dim, \
+                                        input_type=args.cost_input_type, bw_quantile=args.bw_quantile,
+                                        lambda_b=args.lambda_b, seed=args.seed)
+        elif args.cost_input_type == 'sa':
+            cost_function = RBFLinearCost(torch.cat([expert_state, expert_action], dim=1),
+                                        feature_dim=args.cost_feature_dim, \
+                                        input_type=args.cost_input_type, bw_quantile=args.bw_quantile,
+                                        lambda_b=args.lambda_b, seed=args.seed)
+    else:
+        if args.cost_input_type == 'ss':
+            cost_function = MLPCost(torch.cat([expert_state, expert_next_state], dim=1),
+                                    hidden_dims=[512, 512, 512, 512],
+                                    feature_dim=args.cost_feature_dim,
+                                    input_type=args.cost_input_type,
+                                    bw_quantile=args.bw_quantile,
+                                    lambda_b=args.lambda_b,
+                                    seed=args.seed)
+        elif args.cost_input_type == 'sa':
+            cost_function = MLPCost(torch.cat([expert_state, expert_action], dim=1),
+                                    feature_dim=args.cost_feature_dim,
+                                    input_type=args.cost_input_type,
+                                    bw_quantile=args.bw_quantile,
+                                    lambda_b=args.lambda_b,
+                                    seed=args.seed)
 
     # ==============Init Agents==============#
     policy = MLP(state_size, action_size, hidden_sizes=tuple(args.actor_model_hidden), seed=args.seed,

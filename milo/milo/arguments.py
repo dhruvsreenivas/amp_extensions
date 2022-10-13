@@ -3,7 +3,9 @@ import argparse
 
 def get_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    
     #==============General Arguments==============#
+    
     parser.add_argument("--experiment_name", type=str, default="Experiment")
     parser.add_argument('--root_path', type=str, help='Root dir to save outputs', default='./experiments')
     parser.add_argument('--deepmimic', type=str, help='arguments for creating DeepMimicEnv', default='run_amp_humanoid3d_spinkick_args.txt') 
@@ -19,6 +21,7 @@ def get_args():
     parser.add_argument('--num_cpu', type=int, help='number of processes used for inference', default=4)
 
     #==============Reset arguments for resetting character in DeepMimic and Dynamics Model==============#
+    
     parser.add_argument('--custom_time', action='store_true',
                         help='When true, resets to random time between time_min and time_max. Otherwise, resets to time between 0 and end of motion.')
     parser.add_argument('--time_min', default=0, type=float, help='lower bound on reset time')
@@ -39,6 +42,7 @@ def get_args():
     parser.add_argument('--knee_rot', action='store_true', help='When true, random noise added to knees in state')
 
     #==============Dynamic Model arguments==============#
+    
     #=========general args=========#
     parser.add_argument('--dynamic_epochs', type=int, help='number of epochs to train dynamic model', default=500)
     parser.add_argument('--dynamic_grad_clip', type=float, help='Max Gradient Norm', default=1.0)
@@ -46,20 +50,22 @@ def get_args():
     parser.add_argument('--dynamic_hidden_sizes', nargs='+', help='width of layers used for dynamics model', type=int, default=[1024, 1024])
     parser.add_argument('--dynamic_dense_connect', help='bool indicating whether to create MLP in densenet fashion', action='store_true')
     parser.add_argument('--dynamic_num_models', type=int, default=4)
+    
     #=========Optimizer specific args=========#
     parser.add_argument('--dynamic_optim', type=str, help='Optimizer to use [sgd, adam]', default='adam')
     parser.add_argument('--dynamic_lr', type=float, help='lr for training dynamic model', default=1e-3)
     parser.add_argument('--dynamic_momentum', type=float, help='momentum used for sagd optimizer', default=0.9)
     parser.add_argument('--dynamic_eps', type=float, help='eps used for adam optimizer', default=1e-8)
     parser.add_argument('--dynamic_transform', action='store_true')
+    
     #=========Save parameters=========#
     parser.add_argument('--dynamic_save_models', action='store_true')
     parser.add_argument('--dynamic_save_checkpoints',  help='Option to also save intermediate model checkpoints (currently hardcoded to every 100 epochs', action='store_true')
     parser.add_argument('--load_dynamics', action='store_true')
     parser.add_argument('--dynamic_checkpoint', help='Path to checkpoint. This will be loaded if not None', type=str, default=None)
-
-
+    
     #==============Cost arguments==============#
+    parser.add_argument('--mlp_cost', action='store_true', help='whether to train MLP phi(s, a) or linear phi(s, a)')
     parser.add_argument('--cost_feature_dim', help='Dimension of rff features', type=int, default=512)
     parser.add_argument('--cost_input_type', type=str, default='ss')
     parser.add_argument('--bw_quantile', type=float, help='Quantile when fitting bandwidth', default=0.2)

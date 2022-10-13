@@ -55,3 +55,5 @@ __pycache__/
 x64/
 deps/
 commands.txt
+sub_files/
+logs/

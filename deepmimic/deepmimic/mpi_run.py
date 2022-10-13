@@ -2,7 +2,8 @@ import sys
 import subprocess
 from deepmimic.util.arg_parser import ArgParser
 from deepmimic.util.logger import Logger
-import deepmimic.DeepMimic_Optimizer
+import deepmimic.DeepMimic_Optimizer as DeepMimic_Optimizer
+
 def main():
     # Command line arguments
     args = sys.argv[1:]

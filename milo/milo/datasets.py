@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import Dataset
+
 class AmpDataset(Dataset):
 
     def __init__(self, states, actions, next_states, device=torch.device('cpu')):
