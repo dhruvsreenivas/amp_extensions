@@ -105,9 +105,8 @@ def sample_points(env, policy, num_to_collect, base_seed, num_workers=4, mode='s
                        valid if the trajectory did not terminate due to the velocity being too large.
     
     '''
-    # TODO: Add code for if len(envs) ==1
+    # TODO: Add code for if len(envs) == 1
     assert mode == 'samples' or mode == 'trajectories'
-
     
     #Create arguments for each process
     args = []

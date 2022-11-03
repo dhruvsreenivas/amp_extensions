@@ -1,5 +1,7 @@
 import torch
 from torch.utils.data import Dataset
+import numpy as np
+from typing import Optional
 
 class AmpDataset(Dataset):
 
@@ -45,3 +47,59 @@ class AmpDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.states[idx].float(), self.actions[idx].float(), self.next_states[idx].float()
+    
+class AgentReplayBuffer(Dataset):
+    '''Used primarily in trying to make online GAIL work.'''
+    def __init__(self, states: Optional[torch.Tensor]=None, next_states: Optional[torch.Tensor]=None, device=torch.device('cpu'), max_size=100000):
+        self.device = device
+        
+        self.states = states
+        if self.states is not None:
+            self.states = states.to(device)
+        
+        self.next_states = next_states
+        if self.next_states is not None:
+            self.next_states = next_states.to(device)
+            
+        self.max_size = max_size
+        
+    def __len__(self):
+        if self.states is None:
+            return 0
+        return self.states.size(0)
+    
+    def __getitem__(self, idx):
+        if self.states is None:
+            raise Exception('Not possible to select from empty dataset.')
+        state = self.states[idx]
+        next_state = self.next_states[idx]
+        return state, next_state
+    
+    def add(self, states, next_states):
+        states = states.to(self.device)
+        next_states = next_states.to(self.device)
+        
+        if self.states is None:
+            self.states = states
+        else:
+            self.states = torch.cat([self.states, states], dim=0)
+        
+        if self.next_states is None:
+            self.next_states = next_states
+        else:
+            self.next_states = torch.cat([self.next_states, next_states], dim=0)
+            
+        if self.states.size(0) > self.max_size:
+            self.states = self.states[-self.max_size:]
+        
+        if self.next_states.size(0) > self.max_size:
+            self.next_states = self.next_states[-self.max_size:]
+        
+    def sample(self, batch_size):
+        if self.states is None:
+            raise Exception('Not possible to sample from empty dataset.')
+        idxs = np.random.randint(0, self.states.size(0), batch_size)
+        states = self.states[idxs]
+        next_states = self.next_states[idxs]
+        return torch.cat([states, next_states], dim=-1) # so then we can actually do cost stuff immediately
+    

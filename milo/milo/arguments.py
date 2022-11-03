@@ -17,6 +17,7 @@ def get_args():
     parser.add_argument('--validate', action='store_true')
     parser.add_argument('--seed', type=int, help='seed', default=100)
     parser.add_argument('--dynamic_id', type=int, help='dynamic experiment id', default=0)
+    parser.add_argument('--sequence_dynamics_model', action='store_true', help='whether to train a sequence model or not')
     parser.add_argument('--milo_id', type=int, help='milo experiment id', default=0)
     parser.add_argument('--num_cpu', type=int, help='number of processes used for inference', default=4)
 
@@ -65,15 +66,27 @@ def get_args():
     parser.add_argument('--dynamic_checkpoint', help='Path to checkpoint. This will be loaded if not None', type=str, default=None)
     
     #==============Cost arguments==============#
+    parser.add_argument('--gail_cost', action='store_true', help='whether to train with GAIL cost vs MMD cost')
     parser.add_argument('--mlp_cost', action='store_true', help='whether to train MLP phi(s, a) or linear phi(s, a)')
     parser.add_argument('--cost_feature_dim', help='Dimension of rff features', type=int, default=512)
     parser.add_argument('--cost_input_type', type=str, default='ss')
     parser.add_argument('--bw_quantile', type=float, help='Quantile when fitting bandwidth', default=0.2)
+    parser.add_argument('--scaling_coef', type=float, default=0.5, help='GAIL loss scaling param')
+    parser.add_argument('--reg_coef', type=float, default=0.05, help='GAIL regularizer scaling param')
     parser.add_argument('--lambda_b', type=float, help='Bonus/Penalty weighting param', default=0.1)
     parser.add_argument('--cost_lr', type=float,
                         help='0.0 is exact update, otherwise learning rate', default=0.0)
     parser.add_argument('--update_type', type=str,
                         help='exact, geometric, decay, decay_sqrt, ficticious', default='exact')
+    
+    # GAIL args
+    parser.add_argument('--disc_loss_type', type=str, choices=['least_squares', 'log_likelihood'], default='least_squares', help='type of discriminator loss for GAIL')
+    parser.add_argument('--disc_opt', type=str, default='sgd', choices=['sgd', 'adam'], help='discriminator optimizer for GAIL')
+    parser.add_argument('--gail_batch_size', type=int, default=256, help='GAIL batch size')
+    parser.add_argument('--disc_lr', type=float, default=0.00001, help='discriminator lr')
+    parser.add_argument('--disc_momentum', type=float, default=0.9, help='discriminator momentum param')
+    parser.add_argument('--n_disc_update_steps', type=int, default=2, help='number of discriminator update steps per iteration')
+    parser.add_argument('--disc_lambda', type=float, default=10.0, help='gradient penalty coefficient')
 
     #==============MILO args==============#
     #======PG args======#
@@ -109,6 +122,7 @@ def get_args():
     parser.add_argument('--hvp_sample_frac', type=float, help='Fraction of samples for FIM', default=1.0)
 
     # ======General Algorithm Arguments======#
+    parser.add_argument('--use_ppo', action='store_true', help='whether to use ppo or trpo')
     parser.add_argument('--n_iter', type=int, help='Number of offline IL iterations to run', default=300)
     parser.add_argument('--pg_iter', type=int, help='Number of pg steps', default=5)
     parser.add_argument('--num_eval_traj', type=int, help='Number of trajectories to sample in real env for evaluation each step of IL', default=50)

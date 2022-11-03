@@ -2,6 +2,7 @@ import numpy as np
 from deepmimic.env.env import Env
 from deepmimic.DeepMimicCore import DeepMimicCore
 from deepmimic.env.action_space import ActionSpace
+
 class DeepMimicEnv(Env):
     def __init__(self, args, enable_draw):
         super().__init__(args, enable_draw)
@@ -27,7 +28,7 @@ class DeepMimicEnv(Env):
     def reset(self):
         self._core.Reset()
 
-    #Added by Albert
+    # Added by Albert
     def reset_time(self, time, resolve = True, noise_bef_rot = False, low = 0, high = 0, radian = 0,
 		    rot_vel_w_pose = False, vel_noise = False, interp = 1, knee_rot = False):
         '''
@@ -55,7 +56,7 @@ class DeepMimicEnv(Env):
         '''
         self._core.ResetTime(time, resolve, noise_bef_rot, low, high, radian, rot_vel_w_pose, vel_noise, interp, knee_rot)
 
-    #Added by Albert
+    # Added by Albert
     def reset_index(self, index, resolve=True, noise_bef_rot=False, low=0, high=0, radian=0,
                         rot_vel_w_pose=False, vel_noise=False, interp=1, knee_rot=False):
         '''
@@ -89,43 +90,43 @@ class DeepMimicEnv(Env):
     def get_name(self):
         return self._core.GetName()
 
-    #Added by Albert
+    # Added by Albert
     def get_motion_length(self):
         return self._core.GetMotionLength()
 
-    #Added by Albert
+    # Added by Albert
     def get_agent_update_rate(self, agent_id=0):
         return self._core.GetAgentUpdateRate(agent_id)
 
-    #Added by Albert
+    # Added by Albert
     def get_pose_offset(self, agent_id=0):
         return self._core.GetStatePoseOffset(agent_id)
 
-    #Added by Albert
+    # Added by Albert
     def get_pose_size(self, agent_id=0):
         return self._core.GetStatePoseSize(agent_id)
 
-    #Added by Albert
+    # Added by Albert
     def get_vel_offset(self, agent_id=0):
         return self._core.GetStateVelOffset(agent_id)
 
-    #Added by Albert
+    # Added by Albert
     def get_vel_size(self, agent_id=0):
         return self._core.GetStateVelSize(agent_id)
 
-    #Added by Albert
+    # Added by Albert
     def get_phase_offset(self, agent_id=0):
         return self._core.GetStatePhaseOffset(agent_id)
 
-    #Added by Albert
+    # Added by Albert
     def get_phase_size(self, agent_id=0):
         return self._core.GetStatePhaseSize(agent_id)
 
-    #Added by Albert
+    # Added by Albert
     def get_pos_feature_dim(self, agent_id=0):
         return self._core.GetPosFeatureDim(agent_id)
 
-    #Added by Albert
+    # Added by Albert
     def get_rot_feature_dim(self, agent_id=0):
         return self._core.GetRotFeatureDim(agent_id)
 
@@ -249,11 +250,11 @@ class DeepMimicEnv(Env):
         return self._core.EnableAMPTaskReward()
 
 
-    #Added by Albert
+    # Added by Albert
     def get_amp_obs_pose_size(self):
         return self._core.GetAMPObsPoseSize()
 
-    #Added by Albert
+    # Added by Albert
     def get_amp_obs_vel_size(self):
         return self._core.GetAMPObsVelSize()
 
@@ -272,7 +273,7 @@ class DeepMimicEnv(Env):
     def record_amp_obs_expert(self, agent_id):
         return np.array(self._core.RecordAMPObsExpert(agent_id))
 
-    #Added by Albert
+    # Added by Albert
     def record_amp_obs_agent_current(self, agent_id):
         '''
         Returns the features for the current state (pose and velocity) that the discriminator uses.
@@ -283,7 +284,7 @@ class DeepMimicEnv(Env):
     def record_amp_obs_agent(self, agent_id):
         return np.array(self._core.RecordAMPObsAgent(agent_id))
 
-    #Added by Albert
+    # Added by Albert
     def get_dtw_backtrack_path(self, agent_id=0):
         '''
         Returns the cost for each state by doing backtracking on the DP algorithm.

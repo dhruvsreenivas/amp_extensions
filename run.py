@@ -2,8 +2,9 @@ from deepmimic.env.deepmimic_env import DeepMimicEnv
 from milo.utils import *
 from milo.arguments import get_args
 from milo.dynamics import DynamicsEnsemble
-from milo.datasets import AmpDataset
+from milo.datasets import AmpDataset, AgentReplayBuffer
 from milo.linear_cost import MLPCost, RBFLinearCost
+from milo.gail_cost import GAILCost
 
 import numpy as np
 import torch
@@ -20,6 +21,8 @@ from mjrl.algos.behavior_cloning import BC
 from mjrl.algos.npg_cg import NPG
 import time
 
+print('everything imported!')
+
 def main():
     all_start = time.time()
     args = get_args()
@@ -30,7 +33,7 @@ def main():
     arg_parser = ArgParser()
     arg_parser.load_file(args.deepmimic)
     imitate_amp = arg_parser.parse_string('scene') == 'imitate_amp'
-    env = DeepMimicEnv(['--arg_file', args.deepmimic], False) #Comment out and hardcode in state/action size so we don't need to load in deepmimic
+    env = DeepMimicEnv(['--arg_file', args.deepmimic], False) # Comment out and hardcode in state/action size so we don't need to load in deepmimic
 
     state_size = env.get_state_size(0)
     action_size = env.get_action_size(0)
@@ -61,9 +64,11 @@ def main():
         loggers['dynamic'].info(f'>>>>Loading Dynamics model')
         ensemble_path = args.dynamic_checkpoint if args.dynamic_checkpoint else os.path.join(
             dynamic_directories['models_dir'], 'ensemble.pt')
+        
         #Force load to cpu
         device = torch.device('cpu')
         loggers['dynamic'].info(f">>>>Device moved to {device}")
+        
         dynamic_ensemble = DynamicsEnsemble(state_size, action_size, offline_dataset, validate_dataset,
                                             num_models=args.dynamic_num_models,
                                             batch_size=args.dynamic_batch_size, hidden_sizes=args.dynamic_hidden_sizes,
@@ -111,43 +116,80 @@ def main():
                       radian=args.radian, rot_vel_w_pose=args.rot_vel_w_pose, vel_noise=args.vel_noise,
                       interp=args.interp, knee_rot=args.knee_rot)
 
+    # model based envs, real eval env, model based replay buffer
     mb_env = gym.make('simenv-v0', deepmimic_args=args.deepmimic, dynamic_ensemble=dynamic_ensemble, reset_args=reset_args)
     inf_env = gym.make('deepmimic-v0', deepmimic_args=args.deepmimic, reset_args=reset_args)
-
+    
     # ==============Create Costs==============#
     if args.cost_input_type == 'ss':
         #TODO: Change. Currently, the assumption is that if cost_input_type is ss, the expert dataset comes from reference motion so only has s, s' in dataset.
         expert_state, expert_next_state = get_db_mjrl(args.expert_data, expert=True, imitate_amp=imitate_amp)
     else:
         expert_state, expert_action, expert_next_state = get_db_mjrl(args.expert_data, imitate_amp=imitate_amp)
-        
-    if not args.mlp_cost:
-        if args.cost_input_type == 'ss':
-            cost_function = RBFLinearCost(torch.cat([expert_state, expert_next_state], dim=1),
-                                        feature_dim=args.cost_feature_dim, \
-                                        input_type=args.cost_input_type, bw_quantile=args.bw_quantile,
-                                        lambda_b=args.lambda_b, seed=args.seed)
-        elif args.cost_input_type == 'sa':
-            cost_function = RBFLinearCost(torch.cat([expert_state, expert_action], dim=1),
-                                        feature_dim=args.cost_feature_dim, \
-                                        input_type=args.cost_input_type, bw_quantile=args.bw_quantile,
-                                        lambda_b=args.lambda_b, seed=args.seed)
+    
+    # set up agent buffer for online GAIL (this is what Peng used to make GAIL work for him)
+    agent_replay_buffer = AgentReplayBuffer()
+    
+    if not args.gail_cost:
+        if not args.mlp_cost:
+            if args.cost_input_type == 'ss':
+                cost_function = RBFLinearCost(torch.cat([expert_state, expert_next_state], dim=1),
+                                            feature_dim=args.cost_feature_dim, \
+                                            input_type=args.cost_input_type, bw_quantile=args.bw_quantile,
+                                            lambda_b=args.lambda_b, seed=args.seed)
+            elif args.cost_input_type == 'sa':
+                cost_function = RBFLinearCost(torch.cat([expert_state, expert_action], dim=1),
+                                            feature_dim=args.cost_feature_dim, \
+                                            input_type=args.cost_input_type, bw_quantile=args.bw_quantile,
+                                            lambda_b=args.lambda_b, seed=args.seed)
+        else:
+            if args.cost_input_type == 'ss':
+                cost_function = MLPCost(torch.cat([expert_state, expert_next_state], dim=1),
+                                        hidden_dims=[512, 512, 512, 512],
+                                        feature_dim=args.cost_feature_dim,
+                                        input_type=args.cost_input_type,
+                                        bw_quantile=args.bw_quantile,
+                                        lambda_b=args.lambda_b,
+                                        seed=args.seed)
+            elif args.cost_input_type == 'sa':
+                cost_function = MLPCost(torch.cat([expert_state, expert_action], dim=1),
+                                        feature_dim=args.cost_feature_dim,
+                                        input_type=args.cost_input_type,
+                                        bw_quantile=args.bw_quantile,
+                                        lambda_b=args.lambda_b,
+                                        seed=args.seed)
+        loggers['dynamic'].info("======= MMD Cost created! =======")
     else:
+        optim_args = {
+            'lr': args.disc_lr,
+            'momentum': args.disc_momentum
+        }
         if args.cost_input_type == 'ss':
-            cost_function = MLPCost(torch.cat([expert_state, expert_next_state], dim=1),
-                                    hidden_dims=[512, 512, 512, 512],
-                                    feature_dim=args.cost_feature_dim,
-                                    input_type=args.cost_input_type,
-                                    bw_quantile=args.bw_quantile,
-                                    lambda_b=args.lambda_b,
-                                    seed=args.seed)
+            cost_function = GAILCost(torch.cat([expert_state, expert_next_state], dim=1),
+                                     agent_rb=agent_replay_buffer,
+                                     feature_dim=1,
+                                     hidden_dims=[1024, 512],
+                                     input_type=args.cost_input_type,
+                                     scaling_coef=args.scaling_coef,
+                                     lambda_b=args.lambda_b,
+                                     seed=args.seed,
+                                     disc_loss_type=args.disc_loss_type,
+                                     disc_opt=args.disc_opt,
+                                     disc_opt_args=optim_args)
         elif args.cost_input_type == 'sa':
-            cost_function = MLPCost(torch.cat([expert_state, expert_action], dim=1),
-                                    feature_dim=args.cost_feature_dim,
-                                    input_type=args.cost_input_type,
-                                    bw_quantile=args.bw_quantile,
-                                    lambda_b=args.lambda_b,
-                                    seed=args.seed)
+            cost_function = GAILCost(torch.cat([expert_state, expert_action], dim=1),
+                                     agent_rb=agent_replay_buffer,
+                                     feature_dim=1,
+                                     hidden_dims=[1024, 512],
+                                     input_type=args.cost_input_type,
+                                     scaling_coef=args.scaling_coef,
+                                     lambda_b=args.lambda_b,
+                                     seed=args.seed,
+                                     disc_loss_type=args.disc_loss_type,
+                                     disc_opt=args.disc_opt,
+                                     disc_opt_args=optim_args)
+        
+        loggers['dynamic'].info("======= GAIL Cost created! =======")
 
     # ==============Init Agents==============#
     policy = MLP(state_size, action_size, hidden_sizes=tuple(args.actor_model_hidden), seed=args.seed,
@@ -173,10 +215,13 @@ def main():
         expert_paths = get_paths_mjrl(args.expert_data, expert=True)
     elif args.cost_input_type == 'sa':
         expert_paths = get_paths_mjrl(args.expert_data)
+        
     bc_reg_args = {'flag': args.do_bc_reg, 'reg_coeff': args.bc_reg_coeff, 'expert_paths': expert_paths[0]}
+    
     if args.planner == 'trpo':
         cg_args = {'iters': args.cg_iter, 'damping': args.cg_damping}
-        planner_agent = NPG(mb_env, policy, baseline, normalized_step_size=args.kl_dist,
+        # TODO switch back to mb_env for first arg
+        planner_agent = NPG(inf_env, policy, baseline, normalized_step_size=args.kl_dist,
                             hvp_sample_frac=args.hvp_sample_frac, seed=args.seed, FIM_invert_args=cg_args,
                             bc_args=bc_reg_args, save_logs=True)
     else:
@@ -190,10 +235,10 @@ def main():
     while n_iter < args.n_iter:
         loggers['milo'].info(f"{'=' * 10} Main Episode {n_iter + 1} {'=' * 10}")
         loggers['milo'].info("Evaluating....")
-        scores, mmds = evaluate(n_iter, loggers['milo'], writers['milo'], args, inf_env, planner_agent.policy,
-                                cost_function, num_traj=args.num_eval_traj, imitate_amp=imitate_amp)
+        scores, costs = evaluate(n_iter, loggers['milo'], writers['milo'], args, inf_env, planner_agent.policy,
+                                cost_function, num_traj=args.num_eval_traj, imitate_amp=imitate_amp, gail_cost=args.gail_cost)
 
-        save_and_plot(n_iter, args, milo_directories, scores, mmds)
+        save_and_plot(n_iter, args, milo_directories, scores, costs)
 
         if scores['greedy'] > best_policy_score:
             best_policy_score = scores['greedy']
@@ -202,15 +247,31 @@ def main():
             save_checkpoint(milo_directories, planner_agent, cost_function, n_iter + 1, agent_type=args.planner)
 
         # =============== DO PG STEPS =================
-        loggers['milo'].info(f'===PG Planning Start')
+        loggers['milo'].info(f'=== PG Planning Start ===')
         best_baseline_optim, best_baseline = None, None
         curr_max_reward, curr_min_vloss = -float('inf'), float('inf')
+        
         for i in range(args.pg_iter):
-            reward_kwargs = dict(reward_func=cost_function, ensemble=dynamic_ensemble, device=device)
-            planner_args = dict(N=args.samples_per_step, env=mb_env, sample_mode='model_based', \
+            # we can update discriminator for GAIL cost here (do BEFORE we do policy update step!)
+            for _ in range(args.n_disc_update_steps):
+                # TODO update GAIL cost here with samples
+                try:
+                    states, next_states = agent_replay_buffer.sample(256)
+                except Exception:
+                    loggers['milo'].info('Not any samples in the replay buffer--moving to PG update directly.')
+            
+            reward_kwargs = dict(gail_cost=args.gail_cost,
+                                 n_gail_updates=args.n_disc_update_steps,
+                                 reward_func=cost_function,
+                                 ensemble=dynamic_ensemble,
+                                 device=device)
+            
+            # TODO test GAIL implementation by switching env between mb_env / inf_env
+            planner_args = dict(N=args.samples_per_step, env=inf_env, sample_mode='model_based', \
                                 gamma=args.gamma, gae_lambda=args.gae_lambda, num_cpu=args.num_cpu, \
-                                eval_mode=args.eval_mode, verbose=False,
-                                reward_kwargs=reward_kwargs)  # TODO: FIX EVAL MODE
+                                eval_mode=args.eval_mode, verbose=False, agent_rb=agent_replay_buffer,
+                                reward_kwargs=reward_kwargs) # TODO: FIX EVAL MODE
+            
             r_mean, r_std, r_min, r_max, _, infos = planner_agent.train_step(**planner_args)
 
             # Baseline Heuristic
@@ -218,6 +279,7 @@ def main():
                 curr_min_vloss = infos['vf_loss_end']
                 best_baseline = planner_agent.baseline.model.state_dict()
                 best_baseline_optim = planner_agent.baseline.optimizer.state_dict()
+            
             # Stderr Logging
             reward_mean = np.array(infos['reward']).mean()
             int_mean = np.array(infos['int']).mean()
@@ -237,12 +299,29 @@ def main():
             loggers['milo'].info(f"Running Score: {infos['running_score']}")
             loggers['milo'].info(f"Surr improvement: {infos['surr_improvement']}")
 
-            ground_truth_mean = np.array(infos['ground_truth_reward']).mean()
-            loggers['milo'].info(f'Model MMD: {infos["mb_mmd"]}')
-            loggers['milo'].info(f'Bonus MMD: {infos["bonus_mmd"]}')
-            loggers['milo'].info(f'Model Ground Truth Reward: {ground_truth_mean}')
-            loggers['milo'].info('PG Iteration {} reward | int | ext | ep_len ---- {:.2f} | {:.2f} | {:.2f} | {:.2f}' \
-                                 .format(i + 1, reward_mean, int_mean, ext_mean, len_mean))
+            if args.gail_cost:
+                ground_truth_mean = np.array(infos['ground_truth_reward']).mean()
+                loggers['milo'].info(f'Model GAIL cost: {infos["mb_gail_loss"]}')
+                loggers['milo'].info(f'Model GAIL expert disc loss: {infos["expert_disc_loss"]}')
+                loggers['milo'].info(f'Model GAIL MB disc loss: {infos["model_based_disc_loss"]}')
+                loggers['milo'].info(f'GAIL gradient penalty: {infos["gradient_penalty"]}')
+                loggers['milo'].info(f'GAIL regularizer cost: {infos["gail_regularizer_loss"]}')
+                if 'gail_expert_acc' in infos.keys():
+                    loggers['milo'].info(f'GAIL expert accuracy: {infos["gail_expert_acc"]}')
+                    loggers['milo'].info(f'GAIL policy accuracy: {infos["gail_agent_acc"]}')
+                loggers['milo'].info(f'Bonus GAIL cost: {infos["bonus_gail_cost"]}')
+                
+                loggers['milo'].info(f'Model Ground Truth Mean Reward: {ground_truth_mean}')
+                loggers['milo'].info('PG Iteration {} reward | int | ext | ep_len ---- {:.2f} | {:.2f} | {:.2f} | {:.2f}' \
+                                    .format(i + 1, reward_mean, int_mean, ext_mean, len_mean))
+            else:
+                ground_truth_mean = np.array(infos['ground_truth_reward']).mean()
+                loggers['milo'].info(f'Model MMD: {infos["mb_mmd"]}')
+                loggers['milo'].info(f'Bonus MMD: {infos["bonus_mmd"]}')
+                loggers['milo'].info(f'Model Ground Truth Reward: {ground_truth_mean}')
+                loggers['milo'].info('PG Iteration {} reward | int | ext | ep_len ---- {:.2f} | {:.2f} | {:.2f} | {:.2f}' \
+                                    .format(i + 1, reward_mean, int_mean, ext_mean, len_mean))
+            
             save_sim_rewards((n_iter+1)*(i+1)*args.samples_per_step, milo_directories, int_mean, ext_mean, len_mean)
 
             # Tensorboard Logging
@@ -255,9 +334,11 @@ def main():
             writers['milo'].add_scalar('data/value_loss', infos['vf_loss_end'], step_count)
             writers['milo'].add_scalar('data/mb_mmd', infos['mb_mmd'], step_count)
             writers['milo'].add_scalar('data/bonus_mmd', infos['bonus_mmd'], step_count)
+            
         planner_agent.baseline.model.load_state_dict(best_baseline)
         planner_agent.baseline.optimizer.load_state_dict(best_baseline_optim)
         n_iter += 1
+    
     print(f"Total time to train: {time.time() - start_training_time}")
     loggers['milo'].info(f"Total time to train: {time.time() - start_training_time}")
     loggers['milo'].info(f"Total time overall: {time.time() - all_start}")

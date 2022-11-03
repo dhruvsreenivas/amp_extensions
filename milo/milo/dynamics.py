@@ -1,9 +1,13 @@
 import os
+from tkinter.messagebox import NO
 from tqdm import tqdm
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch import distributions as pyd
 #from sklearn.model_selection import KFold
 from torch.utils.tensorboard import SummaryWriter
 import os
@@ -189,13 +193,13 @@ class DynamicsModel():
         if use_resnet:
             self.model = ResidualMLP(state_dim + action_dim, state_dim, hidden_sizes, activation).to(self.device)
         else:
-            self.model = BasicMLP(state_dim+action_dim, state_dim, hidden_sizes, dense_connect, activation).to(self.device)
+            self.model = BasicMLP(state_dim + action_dim, state_dim, hidden_sizes, dense_connect, activation).to(self.device)
 
         self.loss_fn = nn.MSELoss().to(self.device)
         if optim_args['optim'] == 'sgd':
-            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=optim_args['lr'], momentum=optim_args['momentum'], nesterov=True)
+            self.optimizer = optim.SGD(self.model.parameters(), lr=optim_args['lr'], momentum=optim_args['momentum'], nesterov=True)
         elif optim_args['optim'] == 'adam':
-            self.optimizer = torch.optim.Adam(self.model.parameters(), lr=optim_args['lr'], eps=optim_args['eps'])
+            self.optimizer = optim.Adam(self.model.parameters(), lr=optim_args['lr'], eps=optim_args['eps'])
         else:
             assert False, 'Use valid optimizer'
 
@@ -475,4 +479,403 @@ class ResidualMLP(nn.Module):
         out = self.layers[-1](x)
         return out
     
+# ================================================== SEQUENCE MODELING ==================================================
+
+class SequenceModel(nn.Module):
+    '''Sequence dynamics model, with GRU recurrent state.'''
+    def __init__(self,
+                 state_dim,
+                 action_dim,
+                 recurrent_dim,
+                 pre_recurrent_hidden_sizes=[512, 512],
+                 activation='relu'):
+        super().__init__()
+        self.recurrent_dim = recurrent_dim
+        act = nn.ReLU(inplace=True) if activation == 'relu' else nn.Tanh()
+        
+        # Pre GRU
+        hidden_layers = []
+        dim = state_dim + action_dim
+        for size in pre_recurrent_hidden_sizes:
+            hidden_layers.append(nn.Linear(dim, size))
+            hidden_layers.append(act)
+            dim = size
+        
+        self.pre_recurrent = nn.Sequential(*hidden_layers)
+        
+        # GRU
+        self.rnn = nn.GRUCell(dim, recurrent_dim)
+        
+        # Post GRU
+        hidden_layers = []
+        dim = recurrent_dim
+        for size in pre_recurrent_hidden_sizes[::-1] + [state_dim]:
+            hidden_layers.append(nn.Linear(dim, size))
+            hidden_layers.append(act)
+            dim = size
+        
+        self.post_recurrent = nn.Sequential(*hidden_layers)
+        
+    def initial_state(self, batch_size):
+        return torch.zeros(batch_size, self.recurrent_dim)
+        
+    def forward(self, state, action, hidden_state):
+        # preprocessing + through RNN
+        sa = torch.cat([state, action], -1)
+        sa_rep = self.pre_recurrent(sa)
+        new_hidden_state = self.rnn(sa_rep, hidden_state)
+        
+        # postprocessing
+        next_state_pred = self.post_recurrent(new_hidden_state)
+        return next_state_pred, new_hidden_state
+
+class SequenceDynamicsModel:
+    '''Non-Dreamer like sequential model.'''
+    def __init__(self,
+                 state_dim,
+                 action_dim,
+                 recurrent_dim,
+                 hidden_recurrent_dims=[512, 512],
+                 predict_state_diff=False,
+                 transform=False,
+                 transformations=None,
+                 activation='relu',
+                 optim_args={'optim': 'sgd', 'lr': 1e-4, 'momentum': 0.9},
+                 device=torch.device('cpu'),
+                 seed=100):
+        
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        
+        self.predict_state_diff = predict_state_diff
+        self.transform = transform
+        if self.transform:
+            assert transformations is not None
+            self.state_mean, self.state_scale, self.action_mean, self.action_scale, self.diff_mean, self.diff_scale = transformations
+        self.device = device
+        
+        self.model = SequenceModel(state_dim,
+                                   action_dim,
+                                   recurrent_dim,
+                                   hidden_recurrent_dims,
+                                   activation=activation)
+        self.loss_fn = nn.MSELoss().to(device)
+        
+        if optim_args['optim'] == 'sgd':
+            self.model_opt = optim.SGD(self.model.parameters(), lr=optim_args['lr'], momentum=optim_args['momentum'], nesterov=True)
+        else:
+            self.model_opt = optim.Adam(self.model.parameters(), lr=optim_args['lr'])
             
+    def get_gradient_norm(self):
+        params = [p for p in self.model.parameters() if p.grad is not None]
+        if len(params) == 0:
+            return 0
+        total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params]), 2)
+        return total_norm.detach().cpu().item()
+    
+    def forward_seq(self, states, actions, hidden_state=None, unnormalize_out=True):
+        # Convert state and action to tensors
+        if isinstance(states, np.ndarray):
+            states = torch.from_numpy(states).float()
+        if isinstance(actions, np.ndarray):
+            actions = torch.from_numpy(actions).float()
+
+        # Move to device and normalize
+        states, actions = states.to(self.device), actions.to(self.device)
+        if self.transform:
+            states = (states - self.state_mean) / (self.state_scale)
+            actions = (actions - self.action_mean) / (self.action_scale)
+        
+        # process sequentially
+        B = states.size(0)
+        next_preds = []
+        
+        hidden_state = self.model.initial_state(B) if hidden_state is None else hidden_state
+        for state, action in zip(states, actions):
+            next_pred, hidden_state = self.model(state, action, hidden_state)
+            next_preds.append(next_pred)
+        
+        # stack the next state predictions and unnormalize if wanted
+        next_preds = torch.stack(next_preds, dim=0)
+        if unnormalize_out:
+            if self.predict_state_diff:
+                next_preds = next_preds * self.diff_scale + self.diff_mean
+            else:
+                next_preds = next_preds * self.state_scale + self.state_mean
+        
+        return next_preds
+    
+    def train_step(self, states, actions, next_states, grad_clip=False):
+        if self.predict_state_diff:
+            targets = next_states - states
+        else:
+            targets = next_states
+            
+        # for now assume we start purely from scratch with zeros hidden state
+        preds = self.forward_seq(states, actions, hidden_state=None)
+        loss = self.loss_fn(preds, targets)
+        
+        self.model_opt.zero_grad()
+        loss.backward()
+        if grad_clip:
+            nn.utils.clip_grad_norm_(self.model.parameters(), grad_clip)
+        self.model_opt.step()
+        
+        return loss.detach().cpu().item()
+
+# ================================================== DREAMER MODELING ==================================================
+
+class MLPDreamerModel(nn.Module):
+    def __init__(self,
+                 state_dim,
+                 embed_dim,
+                 action_dim,
+                 hidden_dim,
+                 deter_dim,
+                 stoc_dim,
+                 pre_recurrent_hidden_sizes=[512, 512],
+                 activation='elu',
+                 direct_ns_prediction=False,
+                 softplus=False):
+        
+        super().__init__()
+        self.deter_dim = deter_dim
+        self.stoc_dim = stoc_dim
+        self.direct_ns_prediction = direct_ns_prediction
+        self.softplus = softplus
+        act = nn.ReLU(inplace=True) if activation == 'relu' else nn.ELU(inplace=True) if activation == 'elu' else nn.Tanh()
+        
+        # Obs encoder (hardcoded for now)
+        self.encoder = nn.Sequential(
+            nn.Linear(state_dim, 512),
+            act,
+            nn.Linear(512, 512),
+            act,
+            nn.Linear(512, 512),
+            act,
+            nn.Linear(512, 512),
+            act,
+            nn.Linear(512, embed_dim)
+        )
+        
+        # Pre GRU
+        hidden_layers = []
+        dim = stoc_dim + action_dim
+        for size in pre_recurrent_hidden_sizes:
+            hidden_layers.append(nn.Linear(dim, size))
+            hidden_layers.append(act)
+            dim = size
+            
+        self.pre_recurrent = nn.Sequential(*hidden_layers)
+
+        # GRU cell (assume continuous Dreamer model for now)
+        self.rnn = nn.GRUCell(hidden_dim, deter_dim) # TODO think about layernorm GRU here as well
+        
+        # Post GRU
+        if direct_ns_prediction:
+            hidden_layers = []
+            dim = deter_dim
+            for size in pre_recurrent_hidden_sizes[::-1] + [stoc_dim]:
+                hidden_layers.append(nn.Linear(dim, size))
+                if size != stoc_dim:
+                    hidden_layers.append(act)
+                dim = size
+            
+            self.post_recurrent = nn.Sequential(*hidden_layers)
+        else:
+            post_layers = []
+            prior_layers = []
+            
+            post_dim = deter_dim + embed_dim
+            prior_dim = deter_dim
+            
+            for size in pre_recurrent_hidden_sizes[::-1] + [2 * stoc_dim]:
+                post_layers.append(nn.Linear(post_dim, size))
+                prior_layers.append(nn.Linear(prior_dim, size))
+                
+                if size != 2 * state_dim:
+                    hidden_layers.append(act)
+                
+                post_dim = size
+                prior_dim = size
+            
+            self.post_dist_mlp = nn.Sequential(*post_layers)
+            self.prior_dist_mlp = nn.Sequential(*prior_layers)
+        
+        # decoder from feature dim to obs
+        feature_dim = deter_dim + stoc_dim
+        if self.direct_ns_prediction:
+            self.decoder = nn.Sequential(
+                nn.Linear(feature_dim, 512),
+                act,
+                nn.Linear(512, 512),
+                act,
+                nn.Linear(512, 512),
+                act,
+                nn.Linear(512, 512),
+                act,
+                nn.Linear(512, state_dim)
+            )
+        else:
+            self.decoder = nn.Sequential(
+                nn.Linear(feature_dim, 512),
+                act,
+                nn.Linear(512, 512),
+                act,
+                nn.Linear(512, 512),
+                act,
+                nn.Linear(512, 512),
+                act,
+                nn.Linear(512, 2 * state_dim)
+            )
+    
+    def initial_state(self, batch_size):
+        return {
+            'deter': torch.zeros(batch_size, self.deter_dim),
+            'stoc': torch.zeros(batch_size, self.stoc_dim)
+        }
+        
+    def forward(self, state, action, hidden_state):
+        deter_state = hidden_state['deter']
+        prev_latent = hidden_state['stoc']
+        
+        # get state embedding for posterior stuff
+        embedding = self.encoder(state)
+        
+        # now handle recurrent state stuff
+        x = torch.cat([prev_latent, action], -1)
+        x = self.pre_recurrent(x) # includes activation at end
+        
+        new_deter_state = self.rnn(x, deter_state)
+        
+        # now determine whether to do direct next state prediction or dist-based Dreamer
+        if self.direct_ns_prediction:
+            new_stoc_state = self.post_recurrent(new_deter_state.clone()) # in case gradients get messed up
+            new_feature = torch.cat([new_deter_state, new_stoc_state], -1)
+            next_pred = self.decoder(new_feature)
+            return next_pred, {'deter': new_deter_state, 'stoc': new_stoc_state}
+        else:
+            deter_embed = torch.cat([new_deter_state, embedding], -1)
+            prior_out = self.prior_dist_mlp(new_deter_state.clone())
+            post_out = self.post_dist_mlp(deter_embed)
+            
+            prior_mean, prior_log_std = torch.chunk(prior_out, 2, -1)
+            prior_std = F.softplus(prior_log_std) + 0.1 if self.softplus else torch.exp(prior_log_std)
+            post_mean, post_log_std = torch.chunk(post_out, 2, -1)
+            post_std = F.softplus(post_log_std) + 0.1 if self.softplus else torch.exp(post_log_std)
+            
+            post_dist = pyd.Independent(pyd.Normal(post_mean, post_std), reinterpreted_batch_ndims=1)
+            new_stoc_state = post_dist.rsample()
+            
+            new_feature = torch.cat([new_deter_state, new_stoc_state], -1)
+            next_pred_mean, next_pred_std = self.decoder(new_feature)
+            next_pred_std = F.softplus(next_pred_std) if self.softplus else torch.exp(next_pred_std)
+            next_pred_dist = pyd.Independent(pyd.Normal(next_pred_mean, next_pred_std), reinterpreted_batch_ndims=1)
+            next_pred = next_pred_dist.rsample()
+            
+            return next_pred, {'mean': prior_mean, 'std': prior_std}, {'mean': post_mean, 'std': post_std}, {'deter': new_deter_state, 'stoc': new_stoc_state}
+            
+class DreamerModel:
+    '''Dreamer-based sequence model'''
+    def __init__(self,
+                 state_dim,
+                 embed_dim,
+                 action_dim,
+                 hidden_dim,
+                 deter_dim,
+                 stoc_dim,
+                 hidden_recurrent_dims=[512, 512],
+                 predict_state_diff=False,
+                 transform=False,
+                 transformations=None,
+                 direct_ns_prediction=False,
+                 activation='relu',
+                 softplus=False,
+                 optim_args={'optim': 'sgd', 'lr': 1e-4, 'momentum': 0.9},
+                 device=torch.device('cpu'),
+                 seed=100):
+
+        # set seed first
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        
+        self.predict_state_diff = predict_state_diff
+        self.device = device
+        self.direct_ns_prediction = direct_ns_prediction
+        
+        # define model
+        self.model = MLPDreamerModel(state_dim,
+                                     embed_dim,
+                                     action_dim,
+                                     hidden_dim,
+                                     deter_dim,
+                                     stoc_dim,
+                                     hidden_recurrent_dims,
+                                     activation=activation,
+                                     direct_ns_prediction=direct_ns_prediction,
+                                     softplus=softplus).to(device)
+        
+        self.transform = transform
+        if self.transform:
+            assert transformations is not None
+            self.state_mean, self.state_scale, self.action_mean, self.action_scale, self.diff_mean, self.diff_scale = transformations
+        
+        if optim_args['optim'] == 'sgd':
+            self.model_opt = optim.SGD(self.model.parameters(), lr=optim_args['lr'], momentum=optim_args['momentum'], nesterov=True)
+        else:
+            self.model_opt = optim.Adam(self.model.parameters(), lr=optim_args['lr'])
+        
+    def get_gradient_norm(self):
+        params = [p for p in self.model.parameters() if p.grad is not None]
+        if len(params) == 0:
+            return 0
+        total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), 2) for p in params]), 2)
+        return total_norm.detach().cpu().item()
+    
+    def forward_seq(self, states, actions, hidden_state=None):
+        # Convert state and action to tensors
+        if isinstance(states, np.ndarray):
+            states = torch.from_numpy(states).float()
+        if isinstance(actions, np.ndarray):
+            actions = torch.from_numpy(actions).float()
+
+        # Move to device and normalize
+        states, actions = states.to(self.device), actions.to(self.device)
+        if self.transform:
+            states = (states - self.state_mean) / (self.state_scale)
+            actions = (actions - self.action_mean) / (self.action_scale)
+        
+        # process sequentially
+        B = states.size(0)
+        next_preds = []
+        if not self.direct_ns_prediction:
+            post_stats_all = []
+            prior_stats_all = []
+        
+        hidden_state = self.model.initial_state(B) if hidden_state is None else hidden_state
+        for state, action in zip(states, actions):
+            out = self.model(state, action, hidden_state)
+            hidden_state = out[-1]
+            
+            next_pred = out[0]
+            next_preds.append(next_pred)
+            
+            if not self.direct_ns_prediction:
+                prior_stats, post_stats = out[1:-1]
+                post_stats_all.append(post_stats)
+                prior_stats_all.append(prior_stats)
+                
+        return torch.stack(next_preds), post_stats_all, prior_stats_all
+    
+    def train_step(self, states, actions, next_states, grad_clip=False):
+        preds, post_stats_all, prior_stats_all = self.forward_seq(states, actions, hidden_state=None)
+        
+        if self.predict_state_diff:
+            targets = next_states - states
+        else:
+            targets = next_states
+            
+        if self.direct_ns_prediction:
+            prediction_loss = F.mse_loss(preds, targets)
+        else:
+            raise NotImplementedError('Have not implemented log likelihood loss yet')

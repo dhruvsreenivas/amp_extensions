@@ -1,3 +1,4 @@
+from tkinter import E
 import torch
 import numpy as np
 import os
@@ -12,6 +13,7 @@ import matplotlib.pyplot as plt
 #from milo.sampler import sample_points
 from .sampler import sample_points
 from .linear_cost import RBFLinearCost, MLPCost
+from .gail_cost import GAILCost
 
 # ========================
 # === Evaluation Utils ===
@@ -33,10 +35,16 @@ def save_checkpoint(dirs, agent, cost_function, tag, agent_type='trpo'):
                     'baseline_optim': agent.baseline.optimizer.state_dict(),
                     'w': cost_function.w,
                     'net': cost_function.net.state_dict()}
+    elif isinstance(cost_function, GAILCost):
+        checkpoint = {'policy_params': agent.policy.get_param_values(),
+                    'old_policy_params': agent.policy.old_params,
+                    'baseline_params': agent.baseline.model.state_dict(),
+                    'baseline_optim': agent.baseline.optimizer.state_dict(),
+                    'disc': cost_function.disc.state_dict(),
+                    'disc_opt': cost_function.disc_opt.state_dict()}
     if agent_type == 'ppo':
         checkpoint['policy_optim'] = agent.optimizer.state_dict()
     torch.save(checkpoint, osp.join(save_dir, f'checkpoint_{tag}.pt'))
-
 
 def save_sim_rewards(mb_step, dirs, int_mean, ext_mean, len_mean):
     sim_score_path = osp.join(dirs['data_dir'], 'sim_reward.pt')
@@ -104,13 +112,12 @@ def plot_data(dirs, data, labels, x_type='iter'):
 
 
 # TODO add in args
-def evaluate(n_iter, logger, writer, args, env, policy, reward_func, num_traj=10, imitate_amp=True):
+def evaluate(n_iter, logger, writer, args, env, policy, reward_func, num_traj=10, imitate_amp=True, gail_cost=False):
     '''
     This function is used for evaluating policy in the real deepmimic/amp environment, env.
-
     '''
     # TODO: FIX DEEPMIMIC ARG
-    logger.info(f"======Evaluating with seed: {args.seed + n_iter}=====")
+    logger.info(f"=== Evaluating with seed: {args.seed + n_iter} ===")
     greedy_samples = sample_points(env=env, policy=policy, num_to_collect=num_traj, base_seed=args.seed + n_iter,
                                    num_workers=args.num_cpu, mode='trajectories', eval_mode=True, verbose=False,
                                    deepmimic=True)
@@ -124,6 +131,7 @@ def evaluate(n_iter, logger, writer, args, env, policy, reward_func, num_traj=10
     else:
         greedy_scores = np.array([np.sum(traj['rewards']) for traj in greedy_samples])
         sample_scores = np.array([np.sum(traj['rewards']) for traj in samples])
+    
     greedy_mean_lengths = np.mean([len(traj['rewards']) for traj in greedy_samples])
     sample_mean_lengths = np.mean([len(traj['rewards']) for traj in samples])
     greedy_mean, greedy_max, greedy_min = greedy_scores.mean(), greedy_scores.max(), greedy_scores.min()
@@ -145,11 +153,15 @@ def evaluate(n_iter, logger, writer, args, env, policy, reward_func, num_traj=10
     sample_x = torch.from_numpy(sample_x).float()
 
     if reward_func is not None:
-        greedy_diff = reward_func.get_rep(greedy_x).mean(0) - reward_func.phi_e
-        sample_diff = reward_func.get_rep(sample_x).mean(0) - reward_func.phi_e
+        if gail_cost:
+            greedy_gail_cost = reward_func.get_costs(greedy_x).mean()
+            sample_gail_cost = reward_func.get_costs(sample_x).mean()
+        else:
+            greedy_diff = reward_func.get_rep(greedy_x).mean(0) - reward_func.phi_e
+            sample_diff = reward_func.get_rep(sample_x).mean(0) - reward_func.phi_e
 
-        greedy_mmd = torch.dot(greedy_diff, greedy_diff)
-        sample_mmd = torch.dot(sample_diff, sample_diff)
+            greedy_mmd = torch.dot(greedy_diff, greedy_diff)
+            sample_mmd = torch.dot(sample_diff, sample_diff)
     else:
         print('Not caring about MMD here -- doing model-based RL')
         greedy_mmd = 0.0
@@ -160,28 +172,49 @@ def evaluate(n_iter, logger, writer, args, env, policy, reward_func, num_traj=10
     logger.info(
         f'Greedy Evaluation {logger_score_name} mean (min, max): {greedy_mean:.2f} ({greedy_min:.2f}, {greedy_max:.2f})')
     logger.info(f'Greedy Evaluation Trajectory Lengths: {greedy_mean_lengths:.2f}')
-    logger.info(f'Greedy MMD: {greedy_mmd}')
+    if gail_cost:
+        logger.info(f'Greedy GAIL cost: {greedy_gail_cost}')
+    else:
+        logger.info(f'Greedy MMD: {greedy_mmd}')
 
     logger.info(
         f'Sampled Evaluation {logger_score_name} mean (min, max): {sample_mean:.2f} ({sample_min:.2f}, {sample_max:.2f})')
     logger.info(f'Sampled Evaluation Trajectory Lengths: {sample_mean_lengths:.2f}')
-    logger.info(f'Sampled MMD: {sample_mmd}')
+    
+    if gail_cost:
+        logger.info(f'Sampled GAIL cost: {sample_gail_cost}')
+    else:
+        logger.info(f'Sampled MMD: {sample_mmd}')
+        
     # Compute average length
     writer_score_name = 'dtw_cost' if imitate_amp else 'reward'
     writer.add_scalars(f'data/inf_greedy_{writer_score_name}', {'min_score': greedy_min,
                                                                 'mean_score': greedy_mean,
                                                                 'max_score': greedy_max}, n_iter + 1)
     writer.add_scalar('data/inf_greedy_len', greedy_mean_lengths, n_iter + 1)
-    writer.add_scalar('data/greedy_mmd', greedy_mmd, n_iter + 1)
+    if gail_cost:
+        writer.add_scalar('data/greedy_gail_cost', greedy_gail_cost, n_iter + 1)
+    else:
+        writer.add_scalar('data/greedy_mmd', greedy_mmd, n_iter + 1)
+        
     writer.add_scalars(f'data/inf_sampled_{writer_score_name}', {'min_score': sample_min,
                                                                  'mean_score': sample_mean,
                                                                  'max_score': sample_max}, n_iter + 1)
     writer.add_scalar('data/inf_sampled_len', sample_mean_lengths, n_iter + 1)
-    writer.add_scalar('data/sampled_mmd', sample_mmd, n_iter + 1)
+    
+    if gail_cost:
+        writer.add_scalar('data/sampled_gail_cost', sample_gail_cost, n_iter + 1)
+    else:
+        writer.add_scalar('data/sampled_mmd', sample_mmd, n_iter + 1)
 
     scores = {'greedy': greedy_mean, 'sample': sample_mean}
-    mmds = {'greedy': greedy_mmd, 'sample': sample_mmd}
-    return scores, mmds
+    
+    if gail_cost:
+        costs = {'greedy': greedy_gail_cost, 'sample': sample_gail_cost}
+    else:
+        costs = {'greedy': greedy_mmd, 'sample': sample_mmd}
+    
+    return scores, costs
 
 
 # =======================
@@ -291,7 +324,11 @@ def get_dynamics_id(args):
     seed = args.seed
     dynamic_id = args.dynamic_id
     num_models = args.dynamic_num_models
-    return f'id={dynamic_id}-seed={seed}-num_models={num_models}'
+    is_seq = args.sequence_dynamics_model # will use later
+    name = f'id={dynamic_id}-seed={seed}-num_models={num_models}'
+    if is_seq:
+        name += f'-sequence={is_seq}'
+    return name
 
 
 def get_milo_id(args):
@@ -311,7 +348,7 @@ def log_arguments(args, logger):
     logger.info("\n" + table)
 
 
-def setup(args, ask_prompt=True):
+def setup(args, amp=False, ask_prompt=True):
     """
     Directory is
     |- root_dir (experiments)
@@ -340,11 +377,17 @@ def setup(args, ask_prompt=True):
 
     # ==============Make root dynamic and milo directories==============#
     dynamics_dir = os.path.join(args.root_path, 'dynamics')
-    milo_dir = os.path.join(args.root_path, 'milo')
+    if amp:
+        amp_dir = os.path.join(args.root_path, 'amp_impl')
+    else:
+        milo_dir = os.path.join(args.root_path, 'milo')
 
     if not osp.isdir(args.root_path):
         os.makedirs(dynamics_dir)
-        os.makedirs(milo_dir)
+        if amp:
+            os.makedirs(amp_dir)
+        else:
+            os.makedirs(milo_dir)
 
     # ==============Make dynamic model experiment directory==============#
     offline_dataset_name = args.offline_data[args.offline_data.rfind('/') + 1:args.offline_data.find('.pt')]
@@ -405,50 +448,88 @@ def setup(args, ask_prompt=True):
                           args.expert_data.rfind('/') + 1:args.expert_data.find('.pt')]  # TODO FIX:
     # expert_dataset_name = args.expert_data[args.expert_data.rfind("\\") + 1:args.expert_data.find('.pt')]
 
-    milo_data_dir = os.path.join(milo_dir, expert_dataset_name)
-    if not osp.isdir(milo_data_dir):
-        os.makedirs(milo_data_dir)
+    if amp:
+        amp_data_dir = os.path.join(amp_dir, expert_dataset_name)
+    else:
+        milo_data_dir = os.path.join(milo_dir, expert_dataset_name)
+    
+    if amp:
+        if not osp.isdir(amp_data_dir):
+            os.makedirs(amp_data_dir)
+    else:
+        if not osp.isdir(milo_data_dir):
+            os.makedirs(milo_data_dir)
+    
     milo_experiment_id = get_milo_id(args)
-    milo_experiment_dir = os.path.join(milo_data_dir, milo_experiment_id)
-    if osp.isdir(milo_experiment_dir):
+    if amp:
+        amp_experiment_dir = os.path.join(amp_data_dir, milo_experiment_id) # no worries on amp id, separated by directories anyway
+    else:
+        milo_experiment_dir = os.path.join(milo_data_dir, milo_experiment_id)
+    
+    if amp:
+        if osp.isdir(amp_experiment_dir):
+            delete = True
 
-        delete = True
+            if ask_prompt:
+                while True:
+                    reply = input(
+                        "AMP Experiment already exists, delete existing directory? (y/n) ").strip().lower()
+                    if reply not in ['y', 'n', 'yes', 'no']:
+                        print('Please reply with y, n, yes, or no')
+                    else:
+                        delete = False if reply in ['n', 'no'] else True
+                        break
 
-        if ask_prompt:
-            while True:
-                reply = input(
-                    "MILO Experiment already exists, delete existing directory? (y/n) ").strip().lower()
-                if reply not in ['y', 'n', 'yes', 'no']:
-                    print('Please reply with y, n, yes, or no')
-                else:
-                    delete = False if reply in ['n', 'no'] else True
-                    break
+            if delete:
+                print('Deleting existing, duplicate AMP experiment')
+                shutil.rmtree(amp_experiment_dir)
+    else:
+        if osp.isdir(milo_experiment_dir):
+            delete = True
 
-        if delete:
-            print('Deleting existing, duplicate MILO experiment')
-            shutil.rmtree(milo_experiment_dir)
+            if ask_prompt:
+                while True:
+                    reply = input(
+                        "MILO Experiment already exists, delete existing directory? (y/n) ").strip().lower()
+                    if reply not in ['y', 'n', 'yes', 'no']:
+                        print('Please reply with y, n, yes, or no')
+                    else:
+                        delete = False if reply in ['n', 'no'] else True
+                        break
+
+            if delete:
+                print('Deleting existing, duplicate MILO experiment')
+                shutil.rmtree(milo_experiment_dir)
 
     # ==============Creating milo experiment subdirectories==============#
-    milo_logs_dir = osp.join(milo_experiment_dir, 'logs')
-    milo_tensorboard_dir = osp.join(milo_experiment_dir, 'tensorboard_logs')
-    milo_model_dir = osp.join(milo_experiment_dir, 'models')
-    milo_data_dir = osp.join(milo_experiment_dir, 'data')
-    milo_plots_dir = osp.join(milo_experiment_dir, 'plots')
-    milo_directories = {'logs_dir': milo_logs_dir, 'tensorboard_dir': milo_tensorboard_dir,
-                        'models_dir': milo_model_dir,
-                        'data_dir': milo_data_dir, 'plots_dir': milo_plots_dir}
-    if not osp.isdir(milo_experiment_dir):
-        os.makedirs(milo_experiment_dir)
-        os.makedirs(milo_logs_dir)
-        os.makedirs(milo_tensorboard_dir)
-        os.makedirs(milo_model_dir)
-        os.makedirs(milo_data_dir)
-        os.makedirs(milo_plots_dir)
-    milo_logger = init_logger(milo_logs_dir)
-    milo_writer = SummaryWriter(milo_tensorboard_dir)
-    log_arguments(args, milo_logger)
+    exp_dir = amp_experiment_dir if amp else milo_experiment_dir
+    logs_dir = osp.join(exp_dir, 'logs')
+    tensorboard_dir = osp.join(exp_dir, 'tensorboard_logs')
+    model_dir = osp.join(exp_dir, 'models')
+    data_dir = osp.join(exp_dir, 'data')
+    plots_dir = osp.join(exp_dir, 'plots')
+    directories = {'logs_dir': logs_dir, 'tensorboard_dir': tensorboard_dir,
+                   'models_dir': model_dir,
+                   'data_dir': data_dir, 'plots_dir': plots_dir}
+    
+    if not osp.isdir(exp_dir):
+        os.makedirs(exp_dir)
+        os.makedirs(logs_dir)
+        os.makedirs(tensorboard_dir)
+        os.makedirs(model_dir)
+        os.makedirs(data_dir)
+        os.makedirs(plots_dir)
+    
+    # loggers
+    exp_logger = init_logger(logs_dir)
+    exp_writer = SummaryWriter(tensorboard_dir)
+    log_arguments(args, exp_logger)
 
-    loggers = {'dynamic': dynamic_logger, 'milo': milo_logger}
-    writers = {'dynamic': dynamic_writer, 'milo': milo_writer}
+    if amp:
+        loggers = {'dynamic': dynamic_logger, 'amp': exp_logger}
+        writers = {'dynamic': dynamic_writer, 'amp': exp_writer}
+    else:
+        loggers = {'dynamic': dynamic_logger, 'milo': exp_logger}
+        writers = {'dynamic': dynamic_writer, 'milo': exp_writer}
 
-    return milo_directories, dynamic_directories, load_dynamics, loggers, writers, device
+    return directories, dynamic_directories, load_dynamics, loggers, writers, device

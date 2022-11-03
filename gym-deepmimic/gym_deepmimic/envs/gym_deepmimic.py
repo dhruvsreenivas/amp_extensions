@@ -32,7 +32,7 @@ class DeepMimicGymEnv(Env, utils.EzPickle):
         TEST = 1
         TRAIN_END = 2
 
-    def __init__(self, deepmimic_args=None, enable_draw=False,
+    def __init__(self, deepmimic_args=None, train=False, enable_draw=False,
                  seed=None,reset_args={'custom_time': False, 'time_min': 0, 'time_max': 0, 'resolve': True,
                              'noise_bef_rot': False, 'noise_min': 0,
                              'noise_max': 0, 'radian': 0, 'rot_vel_w_pose': False, 'vel_noise': False, 'interp': False,
@@ -42,6 +42,7 @@ class DeepMimicGymEnv(Env, utils.EzPickle):
         Parameter deepmimic_args: A .txt file specifying the scene to load in DeepMimicEnv. There are many examples given
                                     in the DeepMimic directory. This should be the same argument file used to collect the data
                                     that was used to train the dynamics_ensemble
+        Parameter train: Enable training or not (i.e. setting the mode correctly).
         Parameter enable_draw: (bool) If draw, initializes GLUT and also sets up drawing in DeepMimicCore. Render function will
         display current state. If false, GLUT not initalized, no window will show, and calling render does nothing.
         Parameter seed: (int) Seed used for seeding numpy and deepmimic env
@@ -56,7 +57,10 @@ class DeepMimicGymEnv(Env, utils.EzPickle):
 
         # Load DeepMimicEnv
         self.deepmimic = DeepMimicEnv(['--arg_file', deepmimic_args], enable_draw)
-        self.deepmimic.set_mode(self.Mode.TEST)  # 1 for test
+        if train:
+            self.deepmimic.set_mode(self.Mode.TRAIN)
+        else:
+            self.deepmimic.set_mode(self.Mode.TEST)  # 1 for test
         self.seed_env(seed)
 
         #Setup GLUT. This needs to be after DeepMimicEnv/DeepMimicCore is initialized.
@@ -77,7 +81,7 @@ class DeepMimicGymEnv(Env, utils.EzPickle):
                                             dtype=np.float64)
         self.action_space = spaces.Box(low=np.array([-np.inf] * self.action_size), high=np.array([np.inf] * self.action_size),
                                        dtype=np.float64)
-        self.goal_space= spaces.Box(low=np.array([-np.inf] * self.goal_size), high=np.array([np.inf] * self.goal_size),
+        self.goal_space = spaces.Box(low=np.array([-np.inf] * self.goal_size), high=np.array([np.inf] * self.goal_size),
                                        dtype=np.float64)
 
 

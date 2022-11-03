@@ -72,6 +72,7 @@ class BatchREINFORCE:
                    num_samples=10000,
                    eval_mode=False,
                    verbose=False,
+                   agent_rb=None,
                    reward_kwargs=None,
                    ):
 
@@ -83,57 +84,94 @@ class BatchREINFORCE:
         ts = timer.time()
 
         if sample_mode == 'model_based':
-
+            # on-policy samples
             paths = sample_points(env=env, policy=self.policy, num_to_collect=num_samples,
                                   base_seed=self.seed, num_workers=num_cpu, mode='samples',
-                                  eval_mode=eval_mode, verbose=verbose, deepmimic=False) # TODO CHANGE
+                                  eval_mode=eval_mode, verbose=verbose, deepmimic=True) # TODO CHANGE (if real env, set deepmimic to True, otherwise False)
 
+        # throw everything from paths into agent replay buffer, if it exists
+        if agent_rb is not None:
+            states = torch.from_numpy(np.concatenate([traj['observations'] for traj in paths])).float()
+            next_states = torch.from_numpy(np.concatenate([traj['next_observations'] for traj in paths])).float()
+            agent_rb.add(states, next_states)
 
         infos = {'int': [], 'ext': [], 'reward': [], 'ep_len': [], \
-                 'mb_mmd': None, 'bonus_mmd': None, 'vf_loss_start': None, 'vf_loss_end': None, 'vf_epoch': None}
-        infos['ground_truth_reward'] = [np.sum(traj['rewards']) for traj in paths]  # Log the true_rewards TODO: Don't think this is needed
+                 'mb_mmd': np.array(0.0), 'mb_gail_cost': np.array(0.0), 'bonus_mmd': np.array(0.0), 'bonus_gail_cost': np.array(0.0), \
+                 'vf_loss_start': np.array(0.0), 'vf_loss_end': np.array(0.0), 'vf_epoch': np.array(0.0)}
+        infos['ground_truth_reward'] = [np.sum(traj['rewards']) for traj in paths]  # Log the true rewards
+        
         if reward_kwargs is not None:
             print("Replacing rewards")
             # FIT REWARD WITH SAMPLES COLLECTED FOR TRPO
-
+            
             if cost_input_type == 'ss':
-                cost_input = np.concatenate([np.concatenate([traj['observations'], traj['next_observations']], axis=1) for traj in paths],axis=0)
+                cost_input = np.concatenate([np.concatenate([traj['observations'], traj['next_observations']], axis=1) for traj in paths], axis=0)
             elif cost_input_type == 'sa':
                 cost_input = np.concatenate([np.concatenate([traj['observations'], traj['actions']], axis=1) for traj in paths], axis=0) #TODO: FIX THIS LATER
-            mb_mmd = reward_kwargs['reward_func'].fit_cost(torch.from_numpy(cost_input).float())
+                
+            if not reward_kwargs['gail_cost']:
+                mb_mmd = reward_kwargs['reward_func'].fit_cost(torch.from_numpy(cost_input).float())
+                infos['mb_mmd'] = mb_mmd
+            
             del cost_input
-            infos['mb_mmd'] = mb_mmd
             device = reward_kwargs['device']
-            for traj in paths:
-                states = torch.from_numpy(traj['observations']).float()
-                next_states = torch.from_numpy(traj['next_observations']).float()
-                actions = torch.from_numpy(traj['actions']).float()
-                '''
-                We assume the reward function is the linear cost in MILO or a cost function that follows the same interface
-                '''
-                bonus_cost, cost_info = reward_kwargs['reward_func'].get_bonus_costs(states.to(device), \
-                                                                                     actions.to(device),
-                                                                                     reward_kwargs['ensemble'],
-                                                                                     next_states=next_states.to(device))
-                bonus_cost = bonus_cost[:, 0]
+            
+            if reward_kwargs['ensemble'] is not None:
+                for traj in paths:
+                    states = torch.from_numpy(traj['observations']).float()
+                    next_states = torch.from_numpy(traj['next_observations']).float()
+                    actions = torch.from_numpy(traj['actions']).float()
+                    '''
+                    We assume the reward function is the linear cost in MILO or a cost function that follows the same interface
+                    If reward function is GAIL cost, then we can do the same thing basically
+                    '''
+                    bonus_cost, cost_info = reward_kwargs['reward_func'].get_bonus_costs(states.to(device), \
+                                                                                        actions.to(device),
+                                                                                        reward_kwargs['ensemble'],
+                                                                                        next_states=next_states.to(device))
+                    bonus_cost = bonus_cost[:, 0]
 
-                # Record values
-                intrinsic_sum = -np.sum(cost_info['bonus'][:, 0].numpy())
-                extrinsic_sum = -np.sum(cost_info['ipm'][:, 0].numpy())
+                    # Record values
+                    intrinsic_sum = -np.sum(cost_info['bonus'][:, 0].numpy())
+                    extrinsic_sum = -np.sum(cost_info['ipm'][:, 0].numpy())
 
-                infos['int'].append(intrinsic_sum)
-                infos['ext'].append(extrinsic_sum)
-                infos['reward'].append(extrinsic_sum + intrinsic_sum)
-                infos['ep_len'].append(len(traj['rewards']))
+                    infos['int'].append(intrinsic_sum)
+                    infos['ext'].append(extrinsic_sum)
+                    infos['reward'].append(extrinsic_sum + intrinsic_sum)
+                    infos['ep_len'].append(len(traj['rewards']))
 
-                # Replace true rewards with our rewards
-                traj['rewards'] = -1.0 * bonus_cost.cpu().numpy() #Cost is negated since algorithm uses reward
-            infos['bonus_mmd'] = np.concatenate([-1.0 * traj['rewards'] for traj in paths], axis=0).mean() - \
-                                 reward_kwargs['reward_func'].get_expert_cost()
+                    # Replace true rewards with our rewards
+                    traj['rewards'] = -1.0 * bonus_cost.cpu().numpy() # Cost is negated since algorithm uses reward
+            else:
+                # update rewards here with GAIL cost
+                assert reward_kwargs['gail_cost'], 'need to update with GAIL cost here, which requires gail cost to exist'
+                for traj in paths:
+                    states = torch.from_numpy(traj['observations']).float()
+                    next_states = torch.from_numpy(traj['next_observations']).float()
+                    
+                    ss = torch.cat([states, next_states], dim=-1)
+                    # print(f'state, next state concatenated shape: {ss.size()}')
+                    # print(f'reward shape: {traj["rewards"].shape}')
+                    gail_costs = reward_kwargs['reward_func'].get_costs(ss)
+                    # print(f'GAIL cost size: {gail_costs.size()}')
+                    
+                    # now replace with GAIL costs here
+                    traj['rewards'] = -gail_costs.squeeze().cpu().numpy()
+            
+            if reward_kwargs['gail_cost']:
+                states = np.concatenate([traj['observations'] for traj in paths], axis=0)
+                next_states = np.concatenate([traj['next_observations'] for traj in paths], axis=0)
+                ss = np.concatenate([states, next_states], axis=-1)
+                ss = torch.from_numpy(ss).float()
+                infos['on_policy_gail_cost'] = reward_kwargs['reward_func'].get_costs(ss)
+                
+            else:
+                infos['bonus_mmd'] = np.concatenate([-1.0 * traj['rewards'] for traj in paths], axis=0).mean() - reward_kwargs['reward_func'].get_expert_cost()
 
         if self.save_logs:
             self.logger.log_kv('time_sampling', timer.time() - ts)
             infos['sampling_time'] = timer.time() - ts
+            
         self.seed = self.seed + N if self.seed is not None else self.seed
 
         # compute returns
@@ -232,6 +270,13 @@ class BatchREINFORCE:
 
     def process_paths(self, paths):
         # Concatenate from all the trajectories
+        # print('=' * 20 + ' Path shapes: ' + '=' * 20)
+        # for path in paths:
+        #     print(f"Observations: {path['observations'].shape}")
+        #     print(f"Actions: {path['actions'].shape}")
+        #     print(f"Advantages: {path['advantages'].shape}")
+        # print('=' * 20 + ' Done printing path shapes ' + '=' * 20)
+        
         observations = np.concatenate([path["observations"] for path in paths])
         actions = np.concatenate([path["actions"] for path in paths])
         advantages = np.concatenate([path["advantages"] for path in paths])

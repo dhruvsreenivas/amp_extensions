@@ -2,6 +2,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+def weight_init(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_uniform_(m.weight.data)
 
 class FCNetwork(nn.Module):
     def __init__(self, obs_dim, act_dim,
@@ -21,7 +24,7 @@ class FCNetwork(nn.Module):
 
         # hidden layers
         self.fc_layers = nn.ModuleList([nn.Linear(self.layer_sizes[i], self.layer_sizes[i+1]) \
-                         for i in range(len(self.layer_sizes) -1)])
+                         for i in range(len(self.layer_sizes) - 1)])
         self.nonlinearity = torch.relu if nonlinearity == 'relu' else torch.tanh
 
     def set_transformations(self, in_shift=None, in_scale=None, out_shift=None, out_scale=None):
@@ -50,3 +53,4 @@ class FCNetwork(nn.Module):
         out = self.fc_layers[-1](out)
         out = out * self.out_scale + self.out_shift
         return out
+        
